@@ -29,7 +29,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "CLI tool and seamless kernel module for Arturia MiniFuse 1/2";
+    description = "CLI tool and seamless kernel module for Arturia MiniFuse 1/2/4";
     homepage = "https://github.com/nolight132/mf-cli";
     license = lib.licenses.mit;
     mainProgram = "mf-cli";

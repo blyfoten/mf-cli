@@ -3,7 +3,7 @@
 pkgname=mf-cli
 pkgver=0.2.4
 pkgrel=1
-pkgdesc="CLI tool and seamless kernel module for Arturia MiniFuse 1/2"
+pkgdesc="CLI tool and seamless kernel module for Arturia MiniFuse 1/2/4"
 arch=('x86_64')
 url="https://github.com/nolight132/mf-cli"
 license=('MIT' 'GPL-2.0-only')

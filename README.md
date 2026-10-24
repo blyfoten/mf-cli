@@ -1,14 +1,16 @@
 # mf-cli
 
-`mf-cli` is a lightweight Linux command-line utility and kernel module written in Rust and C for controlling hardware features of the Arturia MiniFuse 1/2 audio interface. It allows you to toggle hardware settings that are normally only accessible via the proprietary "MiniFuse Control Center" software on Windows or macOS.
+`mf-cli` is a lightweight Linux command-line utility and kernel module written in Rust and C for controlling hardware features of the Arturia MiniFuse 1/2/4 audio interfaces. It allows you to toggle hardware settings that are normally only accessible via the proprietary "MiniFuse Control Center" software on Windows or macOS.
 
 By default, manipulating USB interfaces from userspace interrupts the active audio stream. `mf-cli` ships with a custom DKMS kernel module that perfectly integrates with the Linux kernel to send commands to the device **seamlessly**, without any audio dropouts!
 
 ## Key Features
 
 - Phantom Power (+48V)
-- Direct Mono
+- Direct Mono (MiniFuse 1/2)
 - Instrument Mode (INST)
+- MiniFuse 4: INST on both inputs, input 3/4 gain and link, the Control Center mixer (mute, solo, level, balance, master), output sources and a status readout
+- MiniFuse 4: `mf-gui`, a mixer window like Control Center with live level meters
 - Seamless control without audio interruption (via DKMS kernel module)
 - Non-Sudo Operation (both native and via fallback)
 - Chain multiple commands at once
@@ -65,6 +67,13 @@ git clone https://github.com/nolight132/mf-cli
 cd mf-cli
 cargo build --release
 sudo cp target/release/mf-cli /usr/bin/
+```
+
+**Optional: build the MiniFuse 4 mixer window (`mf-gui`):**
+
+```bash
+cargo build --release --features gui
+sudo cp target/release/mf-gui /usr/bin/
 ```
 
 **2. Build the seamless Kernel Module (Optional, but highly recommended):**
@@ -125,6 +134,43 @@ mf-cli inst off
 ```bash
 mf-cli inst on 48v on monitor off
 ```
+
+### MiniFuse 4
+
+The MiniFuse 4 has more settings, all of which the Control Center mixer exposes. `mf-cli --help` lists every command. The protocol is documented in [PROTOCOL-MF4.md](PROTOCOL-MF4.md).
+
+Sources are `in1`..`in4` (analog inputs) and `usb1`..`usb6` (computer playback), or the stereo pairs `in12`, `in34`, `usb12`, `usb34` and `usb56`, which act on both channels. Mixers (buses) are `out12`, `out34` and `loop` (Loopback).
+
+```bash
+mf-cli status                          # show all settings
+mf-cli inst2 on                        # instrument mode on input 2
+mf-cli 48v on                          # phantom power (both mic inputs)
+mf-cli gain in3 +6 link34 on           # line input 3/4 gain, linked
+mf-cli mute in1 out12 off              # hear input 1 on outputs 1&2 (direct monitoring)
+mf-cli level in1 out12 -6 pan L        # fader -6 dB, balance hard left
+mf-cli mute in34 out12 off             # stereo pair: both line inputs
+mf-cli level usb12 out12 -10           # both channels, each keeps its balance
+mf-cli solo in2 out12 on
+mf-cli master out12 -10
+mf-cli source out12 mixer              # or "direct" to bypass the mixer
+mf-cli source loop cue2mix             # usb56, cue2mix, out12 or out34
+```
+
+`status` and the commands that write levels need the kernel module from this version (it reports `api_version` 2 or newer). With an older module loaded, `mf-cli` falls back to userspace USB for those commands.
+
+### MiniFuse 4 mixer window (`mf-gui`)
+
+![mf-gui showing the Outputs 1&2 mixer](assets/mf-gui.png)
+
+`mf-gui` is a graphical version of the Control Center mixer, built with `--features gui` (see [Manual build](#manual-build)). It has the same two pages:
+
+- **Inputs:** level meter per analog input, INST on inputs 1 and 2, +48V, and the gain of line inputs 3/4 with their link.
+- **Outputs:** pick Outputs 1&2, Outputs 3&4 or Loopback on the left (with the USB direct switch or loopback source), then set each channel strip's balance, mute, solo and fader, and the master level. Each strip has a level meter of its source and the master has the output meters.
+- **+** adds inputs or computer sources to the mixer, mono or as stereo pairs; **×** on a strip removes it (and mutes it, as Control Center does).
+
+Double-click a fader for 0 dB, or a knob to centre it. The window reads the device four times a second, so changes made on the front panel or with `mf-cli` show up in it.
+
+The level meters need `api_version` 3 of the kernel module, which adds `/dev/minifuse_meters`. Without the kernel module, `mf-gui` uses userspace USB, which interrupts the audio for as long as the window is open.
 
 ## License
 
