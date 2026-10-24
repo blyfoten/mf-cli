@@ -1,5 +1,4 @@
-mod device;
-mod mf4;
+use mf_cli::{device, mf4};
 
 use device::{Model, Transport};
 use std::{env, process::exit};

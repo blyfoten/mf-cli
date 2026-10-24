@@ -46,8 +46,8 @@ selector `s` changes that value.
 | `0x4f` | Solo mask, Outputs 1&2 | bit per source, 1 = soloed | `0` | confirmed |
 | `0x50` | Solo mask, Outputs 3&4 | bit per source | `0` | *unconfirmed* |
 | `0x51` | Solo mask, Loopback | bit per source | `0` | *unconfirmed* |
-| `0x52`–`0x54` | Mixer layout: mono strips shown on Out 1&2 / Out 3&4 / Loopback | bit per input 1–4 | `0xf`, `0xf`, `0` | confirmed for Out 3&4 |
-| `0x55`–`0x57` | Mixer layout: stereo strips shown on Out 1&2 / Out 3&4 / Loopback | bit 0 In 1/2, 1 In 3/4, 2 USB 1/2, 3 USB 3/4, 4 USB 5/6 | `0x04`, `0x08`, `0x10` | confirmed for Out 3&4 |
+| `0x52`–`0x54` | Mixer layout: mono strips shown on Out 1&2 / Out 3&4 / Loopback, written per bit like the mute mask | bit per input 1–4 | `0xf`, `0xf`, `0` | confirmed for Out 1&2 and Out 3&4 |
+| `0x55`–`0x57` | Mixer layout: stereo strips shown on Out 1&2 / Out 3&4 / Loopback, written per bit | bit 0 In 1/2, 1 In 3/4, 2 USB 1/2, 3 USB 3/4, 4 USB 5/6 | `0x04`, `0x08`, `0x10` | confirmed for Out 1&2 and Out 3&4 |
 | `0x58` | Outputs 1&2 source | `0` = USB1/2 direct (bypass mixer), `1` = mixer | `1` | confirmed |
 | `0x59` | Outputs 3&4 source | `2` = USB3/4 direct (bypass mixer), `3` = mixer | `3` | confirmed |
 | `0x5a` | Loopback source | `4` = USB5/6, `5` = Cue2Mix, `6` = OUT1/2, `7` = OUT3/4 | `4` | confirmed |
@@ -95,3 +95,20 @@ other).
 The layout selectors only tell Control Center which strips to draw. When a strip is added or
 removed, Control Center itself writes the related mute (removed strips are muted), solo and gain
 values; a stereo pair is added hard-panned (0 dB on its own side, `0x8000` on the other).
+
+## Level meters (`0xc2`, 64 bytes)
+
+16 little-endian 32-bit linear peak levels, `0x7fffffff` = 0 dBFS. Found by playing into Analog 2
+and muting sources in the mixer while reading the meters.
+
+| Index | Meter |
+|---|---|
+| 0–3 | Analog 1–4 |
+| 4–9 | USB 1–6 (computer playback) |
+| 10, 11 | Outputs 1&2, left / right |
+| 12, 13 | Outputs 3&4, left / right |
+| 14, 15 | Loopback, left / right |
+
+The input and USB meters are the sources before the mixer; the output meters follow the mixer (a
+centred source at 0 dB reads 3 dB below its input meter). Indices 12–15 are *unconfirmed*: they
+read 0 while everything on those mixers was muted.

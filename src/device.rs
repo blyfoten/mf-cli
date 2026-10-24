@@ -1,5 +1,6 @@
+use crate::mf4;
 use rusb::{DeviceHandle, GlobalContext};
-use std::{fs, path::Path, thread::sleep, time::Duration};
+use std::{fs, io::Read, path::Path, thread::sleep, time::Duration};
 
 pub const VID: u16 = 0x1c75;
 const PID_MF1: u16 = 0xaf80;
@@ -8,10 +9,12 @@ const PID_MF2: u16 = 0xaf90;
 const PID_MF4: u16 = 0xaf70;
 
 const KMOD_PATH: &str = "/dev/minifuse_cmd";
+const KMOD_METERS_PATH: &str = "/dev/minifuse_meters";
 const KMOD_API_PATH: &str = "/sys/module/minifuse_mod/parameters/api_version";
 
 const REQ_SET: u8 = 0x22;
 const REQ_GET_BLOCK: u8 = 0xb2;
+const REQ_GET_METERS: u8 = 0xc2;
 pub const BLOCK_LEN: usize = 190;
 const TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -60,7 +63,7 @@ pub fn detect_model() -> Option<Model> {
 }
 
 pub enum Transport {
-    /// The seamless kernel module; `api` 1 only understands on/off writes.
+    /// The seamless kernel module; `api` 1 only understands on/off writes, 3 adds the meters.
     Kmod { api: u32 },
     /// Userspace fallback, which detaches the audio driver while it runs.
     Usb(DeviceHandle<GlobalContext>),
@@ -115,8 +118,16 @@ impl Transport {
     /// Reads the whole settings block (MiniFuse 4).
     pub fn read_block(&mut self) -> Result<Vec<u8>, String> {
         let data = match self {
-            Transport::Kmod { api } if *api >= 2 => fs::read(KMOD_PATH)
-                .map_err(|e| format!("Failed to read settings from kernel module: {}", e))?,
+            // The module returns the whole block from the first read only, so read it in one
+            // call; fs::read would start with a short probe read and truncate it
+            Transport::Kmod { api } if *api >= 2 => {
+                let mut buf = vec![0u8; BLOCK_LEN];
+                let n = fs::File::open(KMOD_PATH)
+                    .and_then(|mut f| f.read(&mut buf))
+                    .map_err(|e| format!("Failed to read settings from kernel module: {}", e))?;
+                buf.truncate(n);
+                buf
+            }
             Transport::Kmod { .. } => return Err("Kernel module cannot read settings".into()),
             Transport::Usb(handle) => {
                 let mut buf = vec![0u8; BLOCK_LEN];
@@ -135,6 +146,28 @@ impl Transport {
             ));
         }
         Ok(data)
+    }
+
+    pub fn has_meters(&self) -> bool {
+        !matches!(self, Transport::Kmod { api } if *api < 3)
+    }
+
+    /// Reads the level meters (MiniFuse 4), see `mf4::parse_meters`.
+    pub fn read_meters(&mut self) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; mf4::METERS_LEN];
+        let n = match self {
+            Transport::Kmod { api } if *api >= 3 => fs::File::open(KMOD_METERS_PATH)
+                .and_then(|mut f| f.read(&mut buf))
+                .map_err(|e| format!("Failed to read meters from kernel module: {}", e))?,
+            Transport::Kmod { .. } => return Err("Kernel module cannot read meters".into()),
+            Transport::Usb(handle) => handle
+                .read_control(0xa1, REQ_GET_METERS, 0, 0, &mut buf, TIMEOUT)
+                .map_err(|e| format!("Failed to read meters: {}", e))?,
+        };
+        if n != mf4::METERS_LEN {
+            return Err(format!("Unexpected meters length {} (expected {})", n, mf4::METERS_LEN));
+        }
+        Ok(buf)
     }
 
     pub fn finish(self) {

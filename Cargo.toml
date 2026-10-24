@@ -3,5 +3,14 @@ name = "mf-cli"
 version = "0.2.4"
 edition = "2024"
 
+[features]
+# The mf-gui mixer window; build with `cargo build --release --features gui`
+gui = ["dep:eframe"]
+
 [dependencies]
 rusb = "0.9.4"
+eframe = { version = "0.31", optional = true }
+
+[[bin]]
+name = "mf-gui"
+required-features = ["gui"]

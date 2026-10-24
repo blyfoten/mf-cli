@@ -121,6 +121,48 @@ pub fn level_and_pan(left: u16, right: u16) -> (Option<f64>, f64) {
     (Some(level), pan)
 }
 
+/// Writes that add a strip for `srcs` (one input, or the two channels of a pair) to the mixer
+/// of `bus`, or remove it, the way Control Center does: the layout bit only tells it which strips
+/// to draw, so it also mutes removed strips, and starts added ones centred at 0 dB, or a pair
+/// hard-panned with each channel at 0 dB on its own side.
+pub fn strip_writes(bus: u8, srcs: &[u8], add: bool) -> Vec<(u16, u16)> {
+    let layout = match srcs {
+        [src] => wvalue(SEL_LAYOUT_MONO + bus, *src),
+        _ => wvalue(SEL_LAYOUT_STEREO + bus, srcs[0] / 2),
+    };
+    let mut writes = vec![(layout, add as u16)];
+    for (i, &src) in srcs.iter().enumerate() {
+        writes.push((wvalue(SEL_SOLO + bus, src), 0));
+        if add {
+            let pan = if srcs.len() == 1 { 0.0 } else if i == 0 { -100.0 } else { 100.0 };
+            let (left, right) = mix_gains(Some(0.0), pan);
+            writes.push((wvalue(mix_selector(bus, 0), src), left));
+            writes.push((wvalue(mix_selector(bus, 1), src), right));
+        } else {
+            writes.push((wvalue(SEL_MUTE + bus, src), 1));
+        }
+    }
+    writes
+}
+
+/// Length of the level meter reply (request `0xc2`).
+pub const METERS_LEN: usize = 64;
+
+/// Level meters in dBFS (-inf when silent): sources 0-9 in the order of `SOURCES`, then the left
+/// and right output of each bus at `10 + 2 * bus`. Each is a little-endian 32-bit linear peak
+/// with `0x7fffffff` as full scale.
+pub fn parse_meters(data: &[u8]) -> [f64; 16] {
+    let mut meters = [f64::NEG_INFINITY; 16];
+    for (m, word) in meters.iter_mut().zip(data.chunks_exact(4)) {
+        let peak = u32::from_le_bytes(word.try_into().unwrap());
+        if peak > 0 {
+            *m = 20.0 * (peak as f64 / i32::MAX as f64).log10();
+        }
+    }
+    meters
+}
+
+#[derive(Clone)]
 pub struct Block(Vec<u8>);
 
 impl Block {
@@ -134,8 +176,44 @@ impl Block {
         u16::from_le_bytes([self.0[i], self.0[i + 1]])
     }
 
-    fn bit(&self, selector: u8, bit: u8) -> bool {
+    fn set(&mut self, selector: u8, value: u16) {
+        let i = selector as usize * 2;
+        if i + 1 < self.0.len() {
+            self.0[i..i + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    pub fn bit(&self, selector: u8, bit: u8) -> bool {
         self.get(selector) & (1 << bit) != 0
+    }
+
+    /// Updates the block the way the device does when `value` is written to `wvalue`:
+    /// bitmask parameters use the channel as the bit, the others as an array index.
+    pub fn apply(&mut self, wvalue: u16, value: u16) {
+        let (sel, ch) = ((wvalue >> 8) as u8, wvalue as u8);
+        if sel == SEL_INST || (SEL_MUTE..SEL_LAYOUT_STEREO + 3).contains(&sel) {
+            let mask = self.get(sel) & !(1 << ch) | ((value != 0) as u16) << ch;
+            self.set(sel, mask);
+        } else {
+            self.set(sel.saturating_add(ch), value);
+        }
+    }
+
+    /// Strips Control Center shows in the mixer of `bus`: single sources and stereo pairs.
+    pub fn strips(&self, bus: u8) -> Vec<Vec<u8>> {
+        let mut strips = Vec::new();
+        for pair in 0..5u8 {
+            let first = pair * 2;
+            for src in [first, first + 1] {
+                if src < 4 && self.bit(SEL_LAYOUT_MONO + bus, src) {
+                    strips.push(vec![src]);
+                }
+            }
+            if self.bit(SEL_LAYOUT_STEREO + bus, pair) {
+                strips.push(vec![first, first + 1]);
+            }
+        }
+        strips
     }
 
     pub fn strip(&self, bus: u8, src: u8) -> (Option<f64>, f64) {
@@ -266,6 +344,60 @@ mod tests {
         let (level, pan) = b.strip(0, 4); // USB 1 -> Outputs 1&2, hard left
         assert!(level.unwrap().abs() < 0.01 && pan < -99.0);
         b.print_status(); // must not panic; see output with --nocapture
+    }
+
+    #[test]
+    fn apply_matches_block_layout() {
+        let mut b = default_block();
+        b.apply(wvalue(SEL_MUTE, 1), 0); // unmute Analog 2 on Outputs 1&2
+        assert_eq!(b.get(SEL_MUTE), 0xffcd);
+        b.apply(wvalue(SEL_INST, 1), 1);
+        assert_eq!(b.get(SEL_INST), 0b10);
+        b.apply(wvalue(mix_selector(1, 0), 2), 0x1234);
+        assert_eq!(b.get(0x1d + 2), 0x1234);
+        b.apply(wvalue(SEL_SOURCE, 0), 0);
+        assert_eq!(b.get(SEL_SOURCE), 0);
+    }
+
+    #[test]
+    fn default_layout_strips() {
+        let b = default_block();
+        // Outputs 1&2 by default: Analog 1, Analog 2 and USB 1/2
+        assert_eq!(b.strips(0), vec![vec![0], vec![1], vec![4, 5]]);
+        assert_eq!(b.strips(2), vec![vec![8, 9]]);
+    }
+
+    #[test]
+    fn adding_and_removing_strips() {
+        let mut b = default_block();
+        for w in strip_writes(1, &[2, 3], true) {
+            b.apply(w.0, w.1);
+        }
+        // Stereo layout of Outputs 3&4 is selector 0x56, In 3/4 its bit 1
+        assert_eq!(strip_writes(1, &[2, 3], true)[0], (0x5601, 1));
+        assert!(b.strips(1).contains(&vec![2, 3]));
+        assert_eq!(b.get(mix_selector(1, 1) + 2), OFF); // In 3 hard left
+        for w in strip_writes(0, &[1], false) {
+            b.apply(w.0, w.1);
+        }
+        assert!(!b.strips(0).contains(&vec![1]));
+        assert!(b.bit(SEL_MUTE, 1));
+    }
+
+    #[test]
+    fn meters_decode() {
+        // Captured: guitar on Analog 2, mixed centred to Outputs 1&2 (-3 dB), nothing else playing
+        const METERS: &str = "ff4b0200ffcfef0cff8b0000ff90000083070000a9070000000000000000000000000000000000008f4f26097f50260900000000000000000000000000000000";
+        let bytes: Vec<u8> = (0..METERS.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&METERS[i..i + 2], 16).unwrap())
+            .collect();
+        let m = parse_meters(&bytes);
+        assert!((m[1] - -19.9).abs() < 0.1, "{}", m[1]);
+        assert!((m[1] - m[10] - 3.0).abs() < 0.1, "{}", m[10]);
+        assert!((m[10] - m[11]).abs() < 0.01);
+        assert_eq!(m[6], f64::NEG_INFINITY);
+        assert_eq!(parse_meters(&[0xff, 0xff, 0xff, 0x7f])[0], 0.0);
     }
 
     #[test]
