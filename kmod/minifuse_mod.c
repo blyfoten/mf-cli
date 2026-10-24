@@ -12,6 +12,18 @@
 
 #define MINIFUSE_VID 0x1c75
 
+/*
+ * Not a USB driver: snd-usb-audio stays bound to the device. The table only lets udev load
+ * this module when a MiniFuse is plugged in (or found at boot).
+ */
+static const struct usb_device_id minifuse_ids[] = {
+    {USB_DEVICE(MINIFUSE_VID, 0xaf80)}, // MiniFuse 1
+    {USB_DEVICE(MINIFUSE_VID, 0xaf82)}, // MiniFuse 1, mass storage mode
+    {USB_DEVICE(MINIFUSE_VID, 0xaf90)}, // MiniFuse 2
+    {USB_DEVICE(MINIFUSE_VID, 0xaf70)}, // MiniFuse 4
+    {}};
+MODULE_DEVICE_TABLE(usb, minifuse_ids);
+
 #define MF_REQ_SET 0x22
 #define MF_REQ_GET_BLOCK 0xb2
 #define MF_BLOCK_LEN 190

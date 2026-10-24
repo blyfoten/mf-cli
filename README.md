@@ -76,14 +76,18 @@ cargo build --release --features gui
 sudo cp target/release/mf-gui /usr/bin/
 ```
 
-**2. Build the seamless Kernel Module (Optional, but highly recommended):**
+**2. Install the seamless Kernel Module (Optional, but highly recommended):**
+
+The module is installed with [DKMS](https://github.com/dell/dkms), which rebuilds it whenever your kernel is updated. Install `dkms` from your distribution first (e.g. `sudo apt install dkms` or `sudo pacman -S dkms`), then:
 
 ```bash
 cd kmod
-make
 sudo make install
-sudo modprobe minifuse_mod
 ```
+
+That's all: the module loads by itself whenever a MiniFuse is connected, including at boot, so there is no `modprobe` or `modules-load.d` entry to set up. Run `sudo make install` again after pulling a new version, and `sudo make uninstall` to remove it.
+
+On Debian and Ubuntu, DKMS signs the module for Secure Boot with its own Machine Owner Key; the first time, it asks you to enroll that key with `mokutil` and reboot.
 
 ## Configuration (Permissions)
 
