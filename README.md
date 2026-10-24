@@ -1,158 +1,82 @@
 # mf-cli
 
-`mf-cli` is a lightweight Linux command-line utility and kernel module written in Rust and C for controlling hardware features of the Arturia MiniFuse 1/2/4 audio interfaces. It allows you to toggle hardware settings that are normally only accessible via the proprietary "MiniFuse Control Center" software on Windows or macOS.
+Linux control for the Arturia MiniFuse 1, 2 and 4 audio interfaces: the settings that otherwise need MiniFuse Control Center on Windows or macOS. It comes as a command-line tool (`mf-cli`), a mixer window for the MiniFuse 4 (`mf-gui`), and a small kernel module that sends the commands without interrupting your audio.
 
-By default, manipulating USB interfaces from userspace interrupts the active audio stream. `mf-cli` ships with a custom DKMS kernel module that perfectly integrates with the Linux kernel to send commands to the device **seamlessly**, without any audio dropouts!
+![mf-gui showing the Outputs 1&2 mixer](assets/mf-gui.png)
 
-## Key Features
+## Features
 
-- Phantom Power (+48V)
-- Direct Mono (MiniFuse 1/2)
-- Instrument Mode (INST)
-- MiniFuse 4: INST on both inputs, input 3/4 gain and link, the Control Center mixer (mute, solo, level, balance, master), output sources and a status readout
+- Instrument mode (INST), phantom power (+48V) and Direct Mono (MiniFuse 1/2)
+- MiniFuse 4: INST on both inputs, input 3/4 gain and link, and the full Control Center mixer for Outputs 1&2, Outputs 3&4 and Loopback (level, balance, mute, solo, master, output source)
 - MiniFuse 4: `mf-gui`, a mixer window like Control Center with live level meters
-- Seamless control without audio interruption (via DKMS kernel module)
-- Non-Sudo Operation (both native and via fallback)
-- Chain multiple commands at once
-
-## ⚠️ Important Note on Secure Boot
-
-To achieve seamless, interruption-free audio toggling, this tool utilizes a custom DKMS kernel module. If you have **Secure Boot enabled** in your BIOS, the Linux kernel will block this unsigned module from loading.
-
-You will either need to disable Secure Boot or sign the DKMS module with your own Machine Owner Key (MOK). If the module cannot be loaded, `mf-cli` will gracefully fall back to standard userspace USB commands (which may cause a brief interruption to your audio stream).
+- No audio dropouts and no `sudo` when the kernel module is installed
 
 ## Installation
 
-### Arch Linux (AUR) - Recommended
+### From source
 
-The AUR package automatically builds both the CLI tool and the DKMS kernel module. Install using your favorite AUR helper:
+You need `cargo`, `libusb` (`libusb-1.0-0-dev` on Debian/Ubuntu), `make`, `dkms` and the headers of your kernel.
 
-```bash
-yay -S mf-cli
-```
-
-### NixOS (flake)
-
-Add the flake as an input and enable the NixOS module. It installs the CLI and the udev rule, and builds the kernel module against the kernel you boot:
-
-```nix
-{
-  inputs.mf-cli.url = "github:nolight132/mf-cli";
-
-  outputs =
-    { nixpkgs, mf-cli, ... }:
-    {
-      nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-        modules = [
-          mf-cli.nixosModules.default
-          { hardware.minifuse.enable = true; }
-        ];
-      };
-    };
-}
-```
-
-Set `hardware.minifuse.kernelModule.enable = false` to skip the kernel module and use the userspace fallback instead.
-
-To try the CLI without installing it, run `nix run github:nolight132/mf-cli -- 48v on`.
-
-### Manual build
-
-Ensure you have `cargo`, `libusb`, `systemd-libs`, `make`, and your system's Linux kernel headers installed.
-
-**1. Build the Rust CLI:**
+**1. The CLI, and the mixer window if you have a MiniFuse 4:**
 
 ```bash
-git clone https://github.com/nolight132/mf-cli
+git clone https://github.com/blyfoten/mf-cli
 cd mf-cli
-cargo build --release
-sudo cp target/release/mf-cli /usr/bin/
-```
-
-**Optional: build the MiniFuse 4 mixer window (`mf-gui`):**
-
-```bash
 cargo build --release --features gui
-sudo cp target/release/mf-gui /usr/bin/
+sudo cp target/release/mf-cli target/release/mf-gui /usr/local/bin/
 ```
 
-**2. Install the seamless Kernel Module (Optional, but highly recommended):**
+Leave out `--features gui` (and `mf-gui`) to build only the CLI.
 
-The module is installed with [DKMS](https://github.com/dell/dkms), which rebuilds it whenever your kernel is updated. Install `dkms` from your distribution first (e.g. `sudo apt install dkms` or `sudo pacman -S dkms`), then:
+**2. The kernel module:**
 
 ```bash
 cd kmod
 sudo make install
 ```
 
-That's all: the module loads by itself whenever a MiniFuse is connected, including at boot, so there is no `modprobe` or `modules-load.d` entry to set up. Run `sudo make install` again after pulling a new version, and `sudo make uninstall` to remove it.
+This installs the module with DKMS, which rebuilds it for every new kernel, and loads it. From then on it loads by itself whenever a MiniFuse is connected. Run `sudo make install` again after pulling a new version (with `mf-gui` closed), and `sudo make uninstall` to remove it.
 
-On Debian and Ubuntu, DKMS signs the module for Secure Boot with its own Machine Owner Key; the first time, it asks you to enroll that key with `mokutil` and reboot.
+With Secure Boot enabled, the module has to be signed. DKMS on Debian and Ubuntu does this with its own Machine Owner Key, which it asks you to enroll with `mokutil` the first time; elsewhere, sign it with your own key or disable Secure Boot.
 
-## Configuration (Permissions)
-
-`mf-cli` is designed to be used without `sudo`.
-
-- **If using the kernel module:** No configuration is required! The module automatically creates a character device at `/dev/minifuse_cmd` with the proper permissions.
-- **If using the userspace fallback (no kernel module):** You must install the provided udev rule to avoid permission denied errors. (The AUR package does this automatically). If installing manually:
-
-1. Copy `99-minifuse.rules` to `/etc/udev/rules.d/`.
-
-2. Reload rules:
+**3. Without the kernel module only:** `mf-cli` then talks to the device from userspace, which briefly interrupts the audio and needs the udev rule to work without `sudo`:
 
 ```bash
+sudo cp 99-minifuse.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
+### Packages
+
+The upstream project ([nolight132/mf-cli](https://github.com/nolight132/mf-cli)) is packaged for Arch Linux (`yay -S mf-cli`) and as a NixOS flake (`hardware.minifuse.enable = true` from `github:nolight132/mf-cli`). These include the CLI and kernel module, but not `mf-gui` yet.
+
 ## Usage
 
-The syntax is straightforward: `mf-cli <target> <on|off>[<target> <on|off> ...]`
-
-`mf-cli` will automatically detect if the kernel module is loaded. If it is, it will route commands seamlessly. If not, it will print a warning and fall back to userspace USB control.
-
-### **Examples:**
-
-#### Toggle Phantom +48V Power
-
 ```bash
-mf-cli 48v on
-mf-cli 48v off
+mf-cli <command> [<command> ...]
 ```
 
-#### Toggle Direct Monitoring Mono:
+Commands can be chained and run in order. `mf-cli --help` lists all of them.
+
+### All models
 
 ```bash
-mf-cli monitor on
-mf-cli monitor off
-```
-
-#### Toggle Instrument Mode:
-
-```bash
-mf-cli inst on
-mf-cli inst off
-```
-
-#### Chain Multiple Commands:
-
-```bash
-mf-cli inst on 48v on monitor off
+mf-cli 48v on                          # phantom power
+mf-cli inst on                         # instrument mode (input 1)
+mf-cli monitor off                     # Direct Mono (MiniFuse 1/2 only)
+mf-cli inst on 48v off monitor on      # chained
 ```
 
 ### MiniFuse 4
 
-The MiniFuse 4 has more settings, all of which the Control Center mixer exposes. `mf-cli --help` lists every command. The protocol is documented in [PROTOCOL-MF4.md](PROTOCOL-MF4.md).
-
-Sources are `in1`..`in4` (analog inputs) and `usb1`..`usb6` (computer playback), or the stereo pairs `in12`, `in34`, `usb12`, `usb34` and `usb56`, which act on both channels. Mixers (buses) are `out12`, `out34` and `loop` (Loopback).
+Sources are `in1`..`in4` (analog inputs) and `usb1`..`usb6` (computer playback), or the stereo pairs `in12`, `in34`, `usb12`, `usb34` and `usb56`, which act on both channels. Mixers are `out12`, `out34` and `loop` (Loopback).
 
 ```bash
 mf-cli status                          # show all settings
 mf-cli inst2 on                        # instrument mode on input 2
-mf-cli 48v on                          # phantom power (both mic inputs)
 mf-cli gain in3 +6 link34 on           # line input 3/4 gain, linked
 mf-cli mute in1 out12 off              # hear input 1 on outputs 1&2 (direct monitoring)
 mf-cli level in1 out12 -6 pan L        # fader -6 dB, balance hard left
-mf-cli mute in34 out12 off             # stereo pair: both line inputs
 mf-cli level usb12 out12 -10           # both channels, each keeps its balance
 mf-cli solo in2 out12 on
 mf-cli master out12 -10
@@ -160,25 +84,23 @@ mf-cli source out12 mixer              # or "direct" to bypass the mixer
 mf-cli source loop cue2mix             # usb56, cue2mix, out12 or out34
 ```
 
-`status` and the commands that write levels need the kernel module from this version (it reports `api_version` 2 or newer). With an older module loaded, `mf-cli` falls back to userspace USB for those commands.
+### Mixer window (MiniFuse 4)
 
-### MiniFuse 4 mixer window (`mf-gui`)
+Run `mf-gui`. It has the same two pages as Control Center:
 
-![mf-gui showing the Outputs 1&2 mixer](assets/mf-gui.png)
-
-`mf-gui` is a graphical version of the Control Center mixer, built with `--features gui` (see [Manual build](#manual-build)). It has the same two pages:
-
-- **Inputs:** level meter per analog input, INST on inputs 1 and 2, +48V, and the gain of line inputs 3/4 with their link.
-- **Outputs:** pick Outputs 1&2, Outputs 3&4 or Loopback on the left (with the USB direct switch or loopback source), then set each channel strip's balance, mute, solo and fader, and the master level. Each strip has a level meter of its source and the master has the output meters.
+- **Inputs:** a level meter per analog input, INST on inputs 1 and 2, +48V, and the gain of line inputs 3/4 with their link.
+- **Outputs:** pick Outputs 1&2, Outputs 3&4 or Loopback on the left (with its USB direct switch or loopback source), then set each strip's balance, mute, solo and fader, and the master level. Strips show the level of their source; the master shows the output.
 - **+** adds inputs or computer sources to the mixer, mono or as stereo pairs; **×** on a strip removes it (and mutes it, as Control Center does).
 
-Double-click a fader for 0 dB, or a knob to centre it. The window reads the device four times a second, so changes made on the front panel or with `mf-cli` show up in it.
+Double-click a fader for 0 dB, or a knob to centre it. The window reads the device four times a second, so changes from the front panel or `mf-cli` show up in it.
 
-The level meters need `api_version` 3 of the kernel module, which adds `/dev/minifuse_meters`. Without the kernel module, `mf-gui` uses userspace USB, which interrupts the audio for as long as the window is open.
+## How it works
+
+Every setting is a USB control request to the interface that the Linux audio driver (`snd-usb-audio`) owns. From userspace, sending one means detaching the audio driver for a moment, which is the audio dropout. The kernel module sends the requests from inside the kernel instead, through `/dev/minifuse_cmd` (settings) and `/dev/minifuse_meters` (level meters), while the audio driver stays attached.
+
+The MiniFuse 4 protocol is documented in [PROTOCOL-MF4.md](PROTOCOL-MF4.md).
 
 ## License
 
-This project consists of two components, which are licensed separately to comply with Linux kernel standards:
-
-- The **Rust CLI utility** (userspace code) is licensed under the [MIT License](LICENSE).
-- The **Linux Kernel Module** (`kmod/` directory) is licensed under the **GNU General Public License v2.0** (GPL-2.0).
+- `mf-cli` and `mf-gui` (userspace code): [MIT License](LICENSE).
+- The kernel module (`kmod/`): GNU General Public License v2.0 (GPL-2.0), as required for Linux kernel code.
