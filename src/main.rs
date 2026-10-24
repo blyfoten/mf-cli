@@ -27,7 +27,8 @@ MiniFuse 4:
   status                         Show the current settings
   dump                           Show the raw settings block
 
-  <source> is in1..in4 or usb1..usb6, <bus> is out12, out34 or loop.
+  <source> is in1..in4 or usb1..usb6, or a stereo pair in12, in34, usb12, usb34
+  or usb56 (both channels; each keeps its own balance). <bus> is out12, out34 or loop.
 
 Examples:
   mf-cli inst on
@@ -36,11 +37,11 @@ Examples:
 ";
 
 enum Kind {
-    /// A single on/off write, which every kernel module version can send.
-    Toggle { wvalue: u16, on: bool },
+    /// On/off writes, which every kernel module version can send.
+    Toggle { wvalues: Vec<u16>, on: bool },
     Link34(bool),
     InputGain { input: u8, raw: u16 },
-    Level { bus: u8, src: u8, level: Option<f64>, pan: Option<f64> },
+    Level { bus: u8, srcs: Vec<u8>, level: Option<f64>, pan: Option<f64> },
     Write { wvalue: u16, value: u16 },
     Status,
     Dump,
@@ -65,11 +66,11 @@ impl Cmd {
 
     fn writes(&self, block: Option<&mf4::Block>) -> Vec<(u16, u16)> {
         let block = || block.expect("settings block was read");
-        match self.kind {
-            Kind::Toggle { wvalue, on } => vec![(wvalue, on as u16)],
+        match &self.kind {
+            Kind::Toggle { wvalues, on } => wvalues.iter().map(|&w| (w, *on as u16)).collect(),
             Kind::Link34(on) => {
-                let mut w = vec![(mf4::wvalue(mf4::SEL_LINK34, 0), on as u16)];
-                if on {
+                let mut w = vec![(mf4::wvalue(mf4::SEL_LINK34, 0), *on as u16)];
+                if *on {
                     // Like Control Center: input 4 takes over the gain of input 3.
                     let in3 = block().get(mf4::SEL_INPUT_GAIN + 2);
                     w.push((mf4::wvalue(mf4::SEL_INPUT_GAIN, 3), in3));
@@ -77,22 +78,26 @@ impl Cmd {
                 w
             }
             Kind::InputGain { input, raw } => {
-                let mut w = vec![(mf4::wvalue(mf4::SEL_INPUT_GAIN, input), raw)];
+                let mut w = vec![(mf4::wvalue(mf4::SEL_INPUT_GAIN, *input), *raw)];
                 // The device does not link the gains itself; Control Center writes both.
                 if block().get(mf4::SEL_LINK34) != 0 {
-                    w.push((mf4::wvalue(mf4::SEL_INPUT_GAIN, input ^ 1), raw));
+                    w.push((mf4::wvalue(mf4::SEL_INPUT_GAIN, input ^ 1), *raw));
                 }
                 w
             }
-            Kind::Level { bus, src, level, pan } => {
-                let pan = pan.unwrap_or_else(|| block().strip(bus, src).1);
-                let (left, right) = mf4::mix_gains(level, pan);
-                vec![
-                    (mf4::wvalue(mf4::mix_selector(bus, 0), src), left),
-                    (mf4::wvalue(mf4::mix_selector(bus, 1), src), right),
-                ]
-            }
-            Kind::Write { wvalue, value } => vec![(wvalue, value)],
+            Kind::Level { bus, srcs, level, pan } => srcs
+                .iter()
+                .flat_map(|&src| {
+                    // Each channel keeps its own balance unless one is given.
+                    let pan = pan.unwrap_or_else(|| block().strip(*bus, src).1);
+                    let (left, right) = mf4::mix_gains(*level, pan);
+                    [
+                        (mf4::wvalue(mf4::mix_selector(*bus, 0), src), left),
+                        (mf4::wvalue(mf4::mix_selector(*bus, 1), src), right),
+                    ]
+                })
+                .collect(),
+            Kind::Write { wvalue, value } => vec![(*wvalue, *value)],
             Kind::Status | Kind::Dump => vec![],
         }
     }
@@ -149,9 +154,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn source(&mut self) -> Result<u8, String> {
+    fn sources(&mut self) -> Result<Vec<u8>, String> {
         let s = self.next("a source")?;
-        mf4::parse_source(s).ok_or_else(|| format!("Unknown source '{}'. Use in1..in4 or usb1..usb6.", s))
+        mf4::parse_sources(s).ok_or_else(|| {
+            format!("Unknown source '{}'. Use in1..in4, usb1..usb6 or a pair such as in12 or usb34.", s)
+        })
     }
 
     fn bus(&mut self) -> Result<u8, String> {
@@ -172,20 +179,20 @@ impl<'a> Parser<'a> {
         let word = self.next("a command")?;
         let mf4 = self.model == Model::Mf4;
         let kind = match word {
-            "inst" | "inst1" => Kind::Toggle { wvalue: mf4::wvalue(mf4::SEL_INST, 0), on: self.on_off()? },
+            "inst" | "inst1" => Kind::Toggle { wvalues: vec![mf4::wvalue(mf4::SEL_INST, 0)], on: self.on_off()? },
             "inst2" => {
                 self.require_mf4(word)?;
-                Kind::Toggle { wvalue: mf4::wvalue(mf4::SEL_INST, 1), on: self.on_off()? }
+                Kind::Toggle { wvalues: vec![mf4::wvalue(mf4::SEL_INST, 1)], on: self.on_off()? }
             }
             "48v" => Kind::Toggle {
-                wvalue: if mf4 { mf4::wvalue(mf4::SEL_48V, 0) } else { 0x0400 },
+                wvalues: vec![if mf4 { mf4::wvalue(mf4::SEL_48V, 0) } else { 0x0400 }],
                 on: self.on_off()?,
             },
             "monitor" => {
                 if mf4 {
                     return Err("'monitor' (Direct Mono) is not known on the MiniFuse 4; use the mixer commands".into());
                 }
-                Kind::Toggle { wvalue: 0x0500, on: self.on_off()? }
+                Kind::Toggle { wvalues: vec![0x0500], on: self.on_off()? }
             }
             "link34" => {
                 self.require_mf4(word)?;
@@ -202,13 +209,14 @@ impl<'a> Parser<'a> {
             }
             "mute" | "solo" => {
                 self.require_mf4(word)?;
-                let (src, bus) = (self.source()?, self.bus()?);
+                let (srcs, bus) = (self.sources()?, self.bus()?);
                 let base = if word == "mute" { mf4::SEL_MUTE } else { mf4::SEL_SOLO };
-                Kind::Toggle { wvalue: mf4::wvalue(base + bus, src), on: self.on_off()? }
+                let wvalues = srcs.iter().map(|&src| mf4::wvalue(base + bus, src)).collect();
+                Kind::Toggle { wvalues, on: self.on_off()? }
             }
             "level" => {
                 self.require_mf4(word)?;
-                let (src, bus) = (self.source()?, self.bus()?);
+                let (srcs, bus) = (self.sources()?, self.bus()?);
                 let level = if self.peek_is("off") {
                     self.pos += 1;
                     None
@@ -216,12 +224,15 @@ impl<'a> Parser<'a> {
                     Some(self.db(-60.0, 12.0)?)
                 };
                 let pan = if self.peek_is("pan") {
+                    if srcs.len() > 1 {
+                        return Err("Set the balance of each channel of a stereo pair separately, e.g. 'level usb1 out12 0 pan L'".into());
+                    }
                     self.pos += 1;
                     Some(self.pan()?)
                 } else {
                     None
                 };
-                Kind::Level { bus, src, level, pan }
+                Kind::Level { bus, srcs, level, pan }
             }
             "master" => {
                 self.require_mf4(word)?;

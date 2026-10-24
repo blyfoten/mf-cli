@@ -131,7 +131,7 @@ mf-cli inst on 48v on monitor off
 
 The MiniFuse 4 has more settings, all of which the Control Center mixer exposes. `mf-cli --help` lists every command. The protocol is documented in [PROTOCOL-MF4.md](PROTOCOL-MF4.md).
 
-Sources are `in1`..`in4` (analog inputs) and `usb1`..`usb6` (computer playback). Mixers (buses) are `out12`, `out34` and `loop` (Loopback).
+Sources are `in1`..`in4` (analog inputs) and `usb1`..`usb6` (computer playback), or the stereo pairs `in12`, `in34`, `usb12`, `usb34` and `usb56`, which act on both channels. Mixers (buses) are `out12`, `out34` and `loop` (Loopback).
 
 ```bash
 mf-cli status                          # show all settings
@@ -140,6 +140,8 @@ mf-cli 48v on                          # phantom power (both mic inputs)
 mf-cli gain in3 +6 link34 on           # line input 3/4 gain, linked
 mf-cli mute in1 out12 off              # hear input 1 on outputs 1&2 (direct monitoring)
 mf-cli level in1 out12 -6 pan L        # fader -6 dB, balance hard left
+mf-cli mute in34 out12 off             # stereo pair: both line inputs
+mf-cli level usb12 out12 -10           # both channels, each keeps its balance
 mf-cli solo in2 out12 on
 mf-cli master out12 -10
 mf-cli source out12 mixer              # or "direct" to bypass the mixer

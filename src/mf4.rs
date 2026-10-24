@@ -34,8 +34,15 @@ pub fn mix_selector(bus: u8, side: u8) -> u8 {
     SEL_MIX + (bus * 2 + side) * 10
 }
 
-pub fn parse_source(s: &str) -> Option<u8> {
-    SOURCES.iter().position(|&n| n == s).map(|i| i as u8)
+/// Stereo pairs as Control Center shows them, by their first source.
+const PAIRS: [(&str, u8); 5] = [("in12", 0), ("in34", 2), ("usb12", 4), ("usb34", 6), ("usb56", 8)];
+
+/// A single source or both channels of a stereo pair.
+pub fn parse_sources(s: &str) -> Option<Vec<u8>> {
+    if let Some(&(_, first)) = PAIRS.iter().find(|(n, _)| *n == s) {
+        return Some(vec![first, first + 1]);
+    }
+    SOURCES.iter().position(|&n| n == s).map(|i| vec![i as u8])
 }
 
 pub fn parse_bus(s: &str) -> Option<u8> {
@@ -259,6 +266,14 @@ mod tests {
         let (level, pan) = b.strip(0, 4); // USB 1 -> Outputs 1&2, hard left
         assert!(level.unwrap().abs() < 0.01 && pan < -99.0);
         b.print_status(); // must not panic; see output with --nocapture
+    }
+
+    #[test]
+    fn stereo_pairs() {
+        assert_eq!(parse_sources("in34"), Some(vec![2, 3]));
+        assert_eq!(parse_sources("usb56"), Some(vec![8, 9]));
+        assert_eq!(parse_sources("usb3"), Some(vec![6]));
+        assert_eq!(parse_sources("in5"), None);
     }
 
     #[test]
