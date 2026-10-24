@@ -100,6 +100,12 @@ Every setting is a USB control request to the interface that the Linux audio dri
 
 The MiniFuse 4 protocol is documented in [PROTOCOL-MF4.md](PROTOCOL-MF4.md).
 
+## Credits
+
+This is a fork of [mf-cli](https://github.com/nolight132/mf-cli), created by Pavel Olizko ([@nolight132](https://github.com/nolight132)) and sleebu ([@zxsleebu](https://github.com/zxsleebu)), who wrote the CLI and the seamless kernel module this all builds on. [@yamplum](https://github.com/yamplum) added support for MiniFuse 1 revision 1.52. Thank you!
+
+This fork adds the MiniFuse 4 mixer commands, the level meters, `mf-gui`, and the DKMS install of the kernel module.
+
 ## License
 
 - `mf-cli` and `mf-gui` (userspace code): [MIT License](LICENSE).
