@@ -1,7 +1,7 @@
-use mf_cli::{device, mf4};
+use mf_cli::{device, mf4, preset};
 
 use device::{Model, Transport};
-use std::{env, process::exit};
+use std::{env, process::exit, thread::sleep, time::Duration};
 
 const USAGE: &str = "\
 Usage: mf-cli <command> [<command> ...]
@@ -26,6 +26,17 @@ MiniFuse 4:
   status                         Show the current settings
   dump                           Show the raw settings block
 
+Presets (MiniFuse 4):
+  preset save <name>             Save the current settings
+  preset load <name>             Apply saved settings
+  preset list                    List saved presets
+  preset delete <name>           Delete a preset
+  preset auto <name|off>         Apply a preset when the MiniFuse 4 is connected in its
+                                 power-on state (with mf-cli-autoload.service, see README)
+  autoload                       Apply that preset now if the device is in its power-on state
+
+  Presets are kept in ~/.config/mf-cli/presets; a name with a '/' is a path to a file instead.
+
   <source> is in1..in4 or usb1..usb6, or a stereo pair in12, in34, usb12, usb34
   or usb56 (both channels; each keeps its own balance). <bus> is out12, out34 or loop.
 
@@ -44,6 +55,11 @@ enum Kind {
     Write { wvalue: u16, value: u16 },
     Status,
     Dump,
+    PresetSave(String),
+    PresetLoad(mf4::Block),
+    PresetList,
+    PresetDelete(String),
+    PresetAuto(Option<String>),
 }
 
 struct Cmd {
@@ -55,12 +71,22 @@ impl Cmd {
     fn needs_block(&self) -> bool {
         matches!(
             self.kind,
-            Kind::Link34(true) | Kind::InputGain { .. } | Kind::Level { pan: None, .. } | Kind::Status | Kind::Dump
+            Kind::Link34(true)
+                | Kind::InputGain { .. }
+                | Kind::Level { pan: None, .. }
+                | Kind::Status
+                | Kind::Dump
+                | Kind::PresetSave(_)
+                | Kind::PresetLoad(_)
         )
     }
 
+    fn needs_device(&self) -> bool {
+        !matches!(self.kind, Kind::PresetList | Kind::PresetDelete(_) | Kind::PresetAuto(_))
+    }
+
     fn needs_full_api(&self) -> bool {
-        !matches!(self.kind, Kind::Toggle { .. } | Kind::Link34(false))
+        self.needs_device() && !matches!(self.kind, Kind::Toggle { .. } | Kind::Link34(false))
     }
 
     fn writes(&self, block: Option<&mf4::Block>) -> Vec<(u16, u16)> {
@@ -97,7 +123,8 @@ impl Cmd {
                 })
                 .collect(),
             Kind::Write { wvalue, value } => vec![(*wvalue, *value)],
-            Kind::Status | Kind::Dump => vec![],
+            Kind::PresetLoad(target) => block().writes_to(target),
+            _ => vec![],
         }
     }
 }
@@ -105,7 +132,8 @@ impl Cmd {
 struct Parser<'a> {
     args: &'a [String],
     pos: usize,
-    model: Model,
+    /// None when no device is connected, which only the preset file commands allow.
+    model: Option<Model>,
 }
 
 impl<'a> Parser<'a> {
@@ -165,18 +193,43 @@ impl<'a> Parser<'a> {
         mf4::parse_bus(s).ok_or_else(|| format!("Unknown bus '{}'. Use out12, out34 or loop.", s))
     }
 
+    fn model(&self) -> Result<Model, String> {
+        self.model.ok_or_else(|| "No MiniFuse device found".into())
+    }
+
     fn require_mf4(&self, word: &str) -> Result<(), String> {
-        if self.model == Model::Mf4 {
+        if self.model()? == Model::Mf4 {
             Ok(())
         } else {
             Err(format!("'{}' is only supported on the MiniFuse 4", word))
         }
     }
 
+    fn preset(&mut self) -> Result<Kind, String> {
+        let action = self.next("save|load|list|delete|auto")?;
+        Ok(match action {
+            "save" => {
+                self.require_mf4("preset save")?;
+                Kind::PresetSave(self.next("a preset name")?.to_string())
+            }
+            "load" => {
+                self.require_mf4("preset load")?;
+                Kind::PresetLoad(preset::load(self.next("a preset name")?)?)
+            }
+            "list" => Kind::PresetList,
+            "delete" => Kind::PresetDelete(self.next("a preset name")?.to_string()),
+            "auto" => match self.next("a preset name or off")? {
+                "off" => Kind::PresetAuto(None),
+                name => Kind::PresetAuto(Some(name.to_string())),
+            },
+            s => return Err(format!("Unknown preset command '{}'. Use save, load, list, delete or auto.", s)),
+        })
+    }
+
     fn command(&mut self) -> Result<Cmd, String> {
         let start = self.pos;
         let word = self.next("a command")?;
-        let mf4 = self.model == Model::Mf4;
+        let mf4 = self.model == Some(Model::Mf4);
         let kind = match word {
             "inst" | "inst1" => Kind::Toggle { wvalues: vec![mf4::wvalue(mf4::SEL_INST, 0)], on: self.on_off()? },
             "inst2" => {
@@ -258,6 +311,7 @@ impl<'a> Parser<'a> {
                 self.require_mf4(word)?;
                 Kind::Dump
             }
+            "preset" => self.preset()?,
             "raw" => {
                 let w = self.next("a wValue in hex")?;
                 let wvalue = u16::from_str_radix(w.trim_start_matches("0x"), 16)
@@ -282,20 +336,101 @@ fn die(msg: &str) -> ! {
     exit(1);
 }
 
+/// Applies the autoload preset if a MiniFuse 4 is connected in its power-on state. Run by
+/// mf-cli-autoload.service when the device appears, together with the kernel module.
+fn autoload() -> Result<(), String> {
+    let Some(name) = preset::autoload() else {
+        println!("[*] No autoload preset set (mf-cli preset auto <name>)");
+        return Ok(());
+    };
+    let target = preset::load(&name)?;
+
+    let mut tries = 0;
+    let model = loop {
+        match device::detect_model() {
+            Some(model) => break model,
+            None if tries < 10 => tries += 1,
+            None => return Err("No MiniFuse device found".into()),
+        }
+        sleep(Duration::from_secs(1));
+    };
+    if model != Model::Mf4 {
+        println!("[*] Presets are only supported on the MiniFuse 4, found a {}", model.name());
+        return Ok(());
+    }
+    // udev loads the kernel module when the device appears; give it time rather than interrupting
+    // the audio from userspace
+    for _ in 0..10 {
+        if device::kmod_present() {
+            break;
+        }
+        sleep(Duration::from_millis(500));
+    }
+
+    let mut transport = Transport::open(true)?;
+    // The device can take a moment to answer after it appears
+    let mut tries = 0;
+    let block = loop {
+        match transport.read_block() {
+            Ok(data) => break mf4::Block::new(data),
+            Err(e) if tries >= 5 => return Err(e),
+            Err(_) => tries += 1,
+        }
+        sleep(Duration::from_secs(1));
+    };
+    if !block.is_factory() {
+        println!("[*] Settings were changed since power-on; not applying preset '{}'", name);
+        transport.finish();
+        return Ok(());
+    }
+    for (wvalue, value) in block.writes_to(&target) {
+        transport.write(wvalue, value)?;
+    }
+    transport.finish();
+    println!("[+] Applied preset '{}'", name);
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "-h" || args[0] == "--help" {
         eprint!("{}", USAGE);
         exit(if args.is_empty() { 1 } else { 0 });
     }
+    if args == ["autoload"] {
+        autoload().unwrap_or_else(|e| die(&e));
+        return;
+    }
 
-    let model = device::detect_model().unwrap_or_else(|| die("No MiniFuse device found"));
+    let model = device::detect_model();
 
     let mut parser = Parser { args: &args, pos: 0, model };
     let mut commands = Vec::new();
     while parser.pos < args.len() {
         commands.push(parser.command().unwrap_or_else(|e| die(&e)));
     }
+
+    // Preset file commands work without a device, and before any are sent
+    commands.retain(|cmd| {
+        let result = match &cmd.kind {
+            Kind::PresetList => preset::list().map(|names| {
+                let auto = preset::autoload();
+                for name in names {
+                    let mark = if auto.as_ref() == Some(&name) { "  (autoload)" } else { "" };
+                    println!("{}{}", name, mark);
+                }
+            }),
+            Kind::PresetDelete(name) => preset::delete(name).map(|_| println!("[+] {}", cmd.label)),
+            Kind::PresetAuto(name) => preset::set_autoload(name.as_deref()).map(|_| println!("[+] {}", cmd.label)),
+            _ => return true,
+        };
+        result.unwrap_or_else(|e| die(&e));
+        false
+    });
+    if commands.is_empty() {
+        return;
+    }
+    let model = model.unwrap_or_else(|| die("No MiniFuse device found"));
 
     let full_api = commands.iter().any(|c| c.needs_full_api() || c.needs_block());
     let mut transport = Transport::open(full_api).unwrap_or_else(|e| die(&e));
@@ -307,9 +442,13 @@ fn main() {
             let data = transport.read_block().unwrap_or_else(|e| die(&e));
             block = Some(mf4::Block::new(data));
         }
-        match cmd.kind {
+        match &cmd.kind {
             Kind::Status => block.as_ref().unwrap().print_status(),
             Kind::Dump => block.as_ref().unwrap().dump(),
+            Kind::PresetSave(name) => {
+                let path = preset::save(name, block.as_ref().unwrap()).unwrap_or_else(|e| die(&e));
+                println!("[+] Saved preset '{}' to {}", name, path.display());
+            }
             _ => {
                 for (wvalue, value) in cmd.writes(block.as_ref()) {
                     transport.write(wvalue, value).unwrap_or_else(|e| die(&e));

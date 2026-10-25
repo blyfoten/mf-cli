@@ -145,6 +145,64 @@ pub fn strip_writes(bus: u8, srcs: &[u8], add: bool) -> Vec<(u16, u16)> {
     writes
 }
 
+/// How a setting is written; see `Block::writes_to`.
+enum Param {
+    /// One write per bit, with the bit as the channel.
+    Bits(u8, u8),
+    /// One write per element, with the index as the channel.
+    Array(u8, u8),
+    /// A single value.
+    Plain(u8),
+}
+
+/// Every setting Control Center writes, which is what a preset holds.
+const PARAMS: [Param; 28] = [
+    Param::Bits(SEL_INST, 2),
+    Param::Plain(SEL_48V),
+    Param::Plain(SEL_LINK34),
+    Param::Array(SEL_INPUT_GAIN, 4),
+    Param::Array(SEL_MIX, 10),
+    Param::Array(SEL_MIX + 10, 10),
+    Param::Array(SEL_MIX + 20, 10),
+    Param::Array(SEL_MIX + 30, 10),
+    Param::Array(SEL_MIX + 40, 10),
+    Param::Array(SEL_MIX + 50, 10),
+    Param::Plain(SEL_MASTER),
+    Param::Plain(SEL_MASTER + 1),
+    Param::Plain(SEL_MASTER + 2),
+    Param::Bits(SEL_MUTE, 10),
+    Param::Bits(SEL_MUTE + 1, 10),
+    Param::Bits(SEL_MUTE + 2, 10),
+    Param::Bits(SEL_SOLO, 10),
+    Param::Bits(SEL_SOLO + 1, 10),
+    Param::Bits(SEL_SOLO + 2, 10),
+    Param::Bits(SEL_LAYOUT_MONO, 4),
+    Param::Bits(SEL_LAYOUT_MONO + 1, 4),
+    Param::Bits(SEL_LAYOUT_MONO + 2, 4),
+    Param::Bits(SEL_LAYOUT_STEREO, 5),
+    Param::Bits(SEL_LAYOUT_STEREO + 1, 5),
+    Param::Bits(SEL_LAYOUT_STEREO + 2, 5),
+    Param::Plain(SEL_SOURCE),
+    Param::Plain(SEL_SOURCE + 1),
+    Param::Plain(SEL_SOURCE + 2),
+];
+
+impl Param {
+    /// Selectors whose value this setting stores.
+    fn selectors(&self) -> std::ops::Range<u8> {
+        match *self {
+            Param::Bits(sel, _) | Param::Plain(sel) => sel..sel + 1,
+            Param::Array(base, n) => base..base + n,
+        }
+    }
+}
+
+/// Settings block of a MiniFuse 4 with factory defaults, as it is after power-on.
+const FACTORY: &str = "000000000000000000000100000000000400fefcfefcfefcfefc000000c4fefcfefcfefcfefcfefcfefcfefcfefc00c40000fefcfefcfefcfefcfefcfefcfefcfefcfefcfefc000000c4fefcfefcfefcfefcfefcfefcfefcfefc00c40000fefcfefcfefcfefcfefcfefcfefcfefcfefcfefc000000c4fefcfefcfefcfefcfefcfefcfefcfefc00c400000000000000000000000000000000cfff3fffffff0000000000000300030000000400080010000100030004000000000000000d60";
+
+/// Header of a preset file: one `<selector> <value>` line in hex per stored selector follows.
+const PRESET_HEADER: &str = "# mf-cli preset for the MiniFuse 4: settings block selector and value, in hex";
+
 /// Length of the level meter reply (request `0xc2`).
 pub const METERS_LEN: usize = 64;
 
@@ -181,6 +239,80 @@ impl Block {
         if i + 1 < self.0.len() {
             self.0[i..i + 2].copy_from_slice(&value.to_le_bytes());
         }
+    }
+
+    pub fn factory() -> Block {
+        let bytes = (0..FACTORY.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&FACTORY[i..i + 2], 16).unwrap())
+            .collect();
+        Block::new(bytes)
+    }
+
+    /// Writes that turn the settings of this block into those of `target`, skipping the ones
+    /// that are already equal.
+    pub fn writes_to(&self, target: &Block) -> Vec<(u16, u16)> {
+        let mut writes = Vec::new();
+        for param in &PARAMS {
+            match *param {
+                Param::Bits(sel, n) => {
+                    for bit in 0..n {
+                        if self.bit(sel, bit) != target.bit(sel, bit) {
+                            writes.push((wvalue(sel, bit), target.bit(sel, bit) as u16));
+                        }
+                    }
+                }
+                Param::Plain(sel) if self.get(sel) != target.get(sel) => {
+                    writes.push((wvalue(sel, 0), target.get(sel)));
+                }
+                Param::Plain(_) => {}
+                Param::Array(base, n) => {
+                    for i in 0..n {
+                        if self.get(base + i) != target.get(base + i) {
+                            writes.push((wvalue(base, i), target.get(base + i)));
+                        }
+                    }
+                }
+            }
+        }
+        writes
+    }
+
+    /// Whether every setting is as it is after power-on.
+    pub fn is_factory(&self) -> bool {
+        self.writes_to(&Block::factory()).is_empty()
+    }
+
+    pub fn to_preset(&self) -> String {
+        let mut text = format!("{}\n", PRESET_HEADER);
+        for sel in PARAMS.iter().flat_map(Param::selectors) {
+            text += &format!("{:02x} {:04x}\n", sel, self.get(sel));
+        }
+        text
+    }
+
+    /// Reads a preset; settings it leaves out keep their factory value.
+    pub fn from_preset(text: &str) -> Result<Block, String> {
+        let mut block = Block::factory();
+        let stored: Vec<u8> = PARAMS.iter().flat_map(Param::selectors).collect();
+        for (n, line) in text.lines().enumerate() {
+            let line = line.split('#').next().unwrap().trim();
+            if line.is_empty() {
+                continue;
+            }
+            let bad = || format!("line {}: expected '<selector> <value>' in hex, got '{}'", n + 1, line);
+            let mut words = line.split_whitespace();
+            let (Some(sel), Some(value), None) = (words.next(), words.next(), words.next()) else {
+                return Err(bad());
+            };
+            let sel = u8::from_str_radix(sel, 16).map_err(|_| bad())?;
+            let value = u16::from_str_radix(value, 16).map_err(|_| bad())?;
+            if !stored.contains(&sel) {
+                return Err(format!("line {}: selector {:02x} is not a setting presets hold", n + 1, sel));
+            }
+            block.set(sel, value);
+        }
+        Ok(block)
     }
 
     pub fn bit(&self, selector: u8, bit: u8) -> bool {
@@ -322,20 +454,9 @@ mod tests {
         assert_eq!(raw_to_db(0xfcfe).map(|d| (d * 100.0).round()), Some(-301.0));
     }
 
-    /// Settings block captured from a MiniFuse 4 with factory defaults.
-    const DEFAULT_BLOCK: &str = "000000000000000000000100000000000400fefcfefcfefcfefc000000c4fefcfefcfefcfefcfefcfefcfefcfefc00c40000fefcfefcfefcfefcfefcfefcfefcfefcfefcfefc000000c4fefcfefcfefcfefcfefcfefcfefcfefc00c40000fefcfefcfefcfefcfefcfefcfefcfefcfefcfefc000000c4fefcfefcfefcfefcfefcfefcfefcfefc00c400000000000000000000000000000000cfff3fffffff0000000000000300030000000400080010000100030004000000000000000d60";
-
-    fn default_block() -> Block {
-        let bytes = (0..DEFAULT_BLOCK.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&DEFAULT_BLOCK[i..i + 2], 16).unwrap())
-            .collect();
-        Block::new(bytes)
-    }
-
     #[test]
     fn default_block_decodes() {
-        let b = default_block();
+        let b = Block::factory();
         assert_eq!(b.get(SEL_48V), 0);
         assert_eq!(b.get(SEL_MUTE), 0xffcf); // only USB 1/2 audible on Outputs 1&2
         assert_eq!(b.get(SEL_SOURCE), 1); // Outputs 1&2 from the mixer
@@ -348,7 +469,7 @@ mod tests {
 
     #[test]
     fn apply_matches_block_layout() {
-        let mut b = default_block();
+        let mut b = Block::factory();
         b.apply(wvalue(SEL_MUTE, 1), 0); // unmute Analog 2 on Outputs 1&2
         assert_eq!(b.get(SEL_MUTE), 0xffcd);
         b.apply(wvalue(SEL_INST, 1), 1);
@@ -361,7 +482,7 @@ mod tests {
 
     #[test]
     fn default_layout_strips() {
-        let b = default_block();
+        let b = Block::factory();
         // Outputs 1&2 by default: Analog 1, Analog 2 and USB 1/2
         assert_eq!(b.strips(0), vec![vec![0], vec![1], vec![4, 5]]);
         assert_eq!(b.strips(2), vec![vec![8, 9]]);
@@ -369,7 +490,7 @@ mod tests {
 
     #[test]
     fn adding_and_removing_strips() {
-        let mut b = default_block();
+        let mut b = Block::factory();
         for w in strip_writes(1, &[2, 3], true) {
             b.apply(w.0, w.1);
         }
@@ -382,6 +503,42 @@ mod tests {
         }
         assert!(!b.strips(0).contains(&vec![1]));
         assert!(b.bit(SEL_MUTE, 1));
+    }
+
+    #[test]
+    fn presets_round_trip() {
+        let mut b = Block::factory();
+        assert!(b.is_factory());
+        assert!(b.writes_to(&Block::factory()).is_empty());
+        let mut writes = vec![(wvalue(SEL_INST, 1), 1), (wvalue(SEL_48V, 0), 1), (wvalue(SEL_INPUT_GAIN, 2), 0x0600)];
+        writes.extend(strip_writes(1, &[2, 3], true));
+        writes.push((wvalue(SEL_MUTE + 2, 9), 0));
+        writes.push((wvalue(SEL_MASTER + 1, 0), 0xf000));
+        writes.push((wvalue(SEL_SOURCE + 2, 0), 5));
+        for &(w, v) in &writes {
+            b.apply(w, v);
+        }
+        assert!(!b.is_factory());
+
+        let loaded = Block::from_preset(&b.to_preset()).unwrap();
+        assert!(loaded.writes_to(&b).is_empty());
+        // Applying the writes to the factory block gives the preset back
+        let mut f = Block::factory();
+        for (w, v) in f.writes_to(&loaded) {
+            f.apply(w, v);
+        }
+        assert!(f.writes_to(&b).is_empty() && b.writes_to(&f).is_empty());
+    }
+
+    #[test]
+    fn preset_parsing() {
+        let b = Block::from_preset("# comment\n\n03 0001  # 48V on\n4c ffcd\n").unwrap();
+        assert_eq!(b.get(SEL_48V), 1);
+        assert!(!b.bit(SEL_MUTE, 1));
+        assert_eq!(b.get(SEL_SOURCE), 1); // left out: factory value
+        assert!(Block::from_preset("03").is_err());
+        assert!(Block::from_preset("zz 0001").is_err());
+        assert!(Block::from_preset("05 0001").is_err()); // not a setting presets hold
     }
 
     #[test]

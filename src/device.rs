@@ -62,6 +62,11 @@ pub fn detect_model() -> Option<Model> {
     None
 }
 
+/// Whether the kernel module is loaded.
+pub fn kmod_present() -> bool {
+    Path::new(KMOD_PATH).exists()
+}
+
 pub enum Transport {
     /// The seamless kernel module; `api` 1 only understands on/off writes, 3 adds the meters.
     Kmod { api: u32 },
@@ -73,7 +78,7 @@ impl Transport {
     /// Opens the kernel module if it can do what is needed, otherwise falls back to userspace USB.
     /// `full_api` means values other than on/off are written or the settings block is read.
     pub fn open(full_api: bool) -> Result<Transport, String> {
-        if Path::new(KMOD_PATH).exists() {
+        if kmod_present() {
             let api = fs::read_to_string(KMOD_API_PATH)
                 .ok()
                 .and_then(|s| s.trim().parse().ok())

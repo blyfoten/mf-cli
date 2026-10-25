@@ -1,0 +1,8 @@
+# Applies the autoload preset (mf-cli preset auto <name>) when a MiniFuse 4 in its power-on state
+# is connected. Started by the udev rule in 99-minifuse.rules; install it to /etc/systemd/user/.
+[Unit]
+Description=Apply the mf-cli autoload preset to the MiniFuse
+
+[Service]
+Type=oneshot
+ExecStart=mf-cli autoload

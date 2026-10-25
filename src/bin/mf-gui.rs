@@ -7,6 +7,7 @@
 use eframe::egui::{self, Color32, RichText};
 use mf_cli::device::{self, Model, Transport};
 use mf_cli::mf4::{self, Block};
+use mf_cli::preset;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -123,6 +124,9 @@ struct App {
     tab: Tab,
     bus: u8,
     show_all: bool,
+    /// Name typed in the presets menu, and the outcome of the last preset action.
+    preset_name: String,
+    preset_msg: Option<Result<String, String>>,
 }
 
 impl App {
@@ -581,6 +585,54 @@ impl App {
         });
     }
 
+    fn presets(&mut self, ui: &mut egui::Ui, b: &Block) {
+        let auto = preset::autoload();
+        let names = preset::list().unwrap_or_else(|e| {
+            self.preset_msg = Some(Err(e));
+            Vec::new()
+        });
+        if names.is_empty() {
+            ui.label("No presets saved yet");
+        }
+        egui::Grid::new("presets").show(ui, |ui| {
+            for name in names {
+                if ui.button(&name).on_hover_text("Apply this preset").clicked() {
+                    self.preset_msg = Some(preset::load(&name).map(|target| {
+                        self.send(b.writes_to(&target));
+                        format!("Applied '{}'", name)
+                    }));
+                }
+                let is_auto = auto.as_ref() == Some(&name);
+                let hover = "Apply when the MiniFuse is connected in its power-on state";
+                if ui.selectable_label(is_auto, "autoload").on_hover_text(hover).clicked() {
+                    let set = (!is_auto).then_some(name.as_str());
+                    self.preset_msg = Some(preset::set_autoload(set).map(|_| match set {
+                        Some(_) => format!("'{}' loads when the MiniFuse is connected", name),
+                        None => "No preset loads when the MiniFuse is connected".into(),
+                    }));
+                }
+                if ui.button("🗑").on_hover_text("Delete").clicked() {
+                    self.preset_msg = Some(preset::delete(&name).map(|_| format!("Deleted '{}'", name)));
+                }
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            let edit = ui.add(egui::TextEdit::singleline(&mut self.preset_name).hint_text("Name").desired_width(140.0));
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Save current").clicked() || enter) && !self.preset_name.trim().is_empty() {
+                let name = self.preset_name.trim().to_string();
+                self.preset_msg = Some(preset::save(&name, b).map(|_| format!("Saved '{}'", name)));
+            }
+        });
+        match &self.preset_msg {
+            Some(Ok(msg)) => ui.label(msg),
+            Some(Err(e)) => ui.colored_label(MUTE, e),
+            None => ui.label(""),
+        };
+    }
+
     fn outputs(&mut self, ui: &mut egui::Ui, b: &Block) {
         egui::SidePanel::left("buses").resizable(false).show_inside(ui, |ui| {
             for bus in 0..3 {
@@ -619,6 +671,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive();
 
+        let block = self.block.clone();
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("MINIFUSE").size(20.0).color(Color32::from_rgb(0xb0, 0x90, 0xf0)));
@@ -629,6 +682,10 @@ impl eframe::App for App {
                     if toggle(ui, on, name, ACCENT, egui::vec2(90.0, 26.0)) {
                         self.tab = tab;
                     }
+                }
+                if let Some(b) = &block {
+                    ui.add_space(20.0);
+                    ui.menu_button("PRESETS", |ui| self.presets(ui, b));
                 }
                 if !self.kmod {
                     ui.colored_label(SOLO, "⚠ No kernel module: audio is interrupted while this is open");
@@ -643,7 +700,7 @@ impl eframe::App for App {
             });
         }
 
-        let Some(b) = self.block.clone() else {
+        let Some(b) = block else {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.centered_and_justified(|ui| ui.label("Reading MiniFuse settings…"));
             });
@@ -703,6 +760,8 @@ fn main() -> eframe::Result {
                 tab: Tab::Outputs,
                 bus: 0,
                 show_all: false,
+                preset_name: String::new(),
+                preset_msg: None,
             }))
         }),
     )

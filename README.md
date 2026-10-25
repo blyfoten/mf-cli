@@ -9,6 +9,7 @@ Linux control for the Arturia MiniFuse 1, 2 and 4 audio interfaces: the settings
 - Instrument mode (INST), phantom power (+48V) and Direct Mono (MiniFuse 1/2)
 - MiniFuse 4: INST on both inputs, input 3/4 gain and link, and the full Control Center mixer for Outputs 1&2, Outputs 3&4 and Loopback (level, balance, mute, solo, master, output source)
 - MiniFuse 4: `mf-gui`, a mixer window like Control Center with live level meters
+- MiniFuse 4: presets, and one that is applied by itself when the interface is connected
 - No audio dropouts and no `sudo` when the kernel module is installed
 
 ## Installation
@@ -45,6 +46,17 @@ With Secure Boot enabled, the module has to be signed. DKMS on Debian and Ubuntu
 sudo cp 99-minifuse.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
+
+**4. Applying a preset on connect (optional):** install the udev rule from step 3 (it also starts the service) and the user service:
+
+```bash
+sudo cp 99-minifuse.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo cp mf-cli-autoload.service /etc/systemd/user/
+systemctl --user daemon-reload
+```
+
+The service runs the `mf-cli` in `/usr/local/bin` (or `/usr/bin`), so copy the new build there as in step 1 whenever you update; an older copy fails with its usage text in the log. Then pick the preset with `mf-cli preset auto <name>`, see [Presets](#presets-minifuse-4).
 
 ### Packages
 
@@ -92,7 +104,32 @@ Run `mf-gui`. It has the same two pages as Control Center:
 - **Outputs:** pick Outputs 1&2, Outputs 3&4 or Loopback on the left (with its USB direct switch or loopback source), then set each strip's balance, mute, solo and fader, and the master level. Strips show the level of their source; the master shows the output.
 - **+** adds inputs or computer sources to the mixer, mono or as stereo pairs; **×** on a strip removes it (and mutes it, as Control Center does).
 
+**PRESETS** at the top saves the current settings, applies or deletes saved presets, and picks the one to apply on connect.
+
 Double-click a fader for 0 dB, or a knob to centre it. The window reads the device four times a second, so changes from the front panel or `mf-cli` show up in it.
+
+### Presets (MiniFuse 4)
+
+A preset holds every setting Control Center has: INST, +48V, input gain and link, and the three mixers with their strips, levels, balance, mute, solo, master and source.
+
+```bash
+mf-cli preset save studio              # save the current settings
+mf-cli preset load studio              # apply them (only what differs is written)
+mf-cli preset list
+mf-cli preset delete studio
+mf-cli preset auto studio              # apply on connect; "off" to stop
+```
+
+Presets are files in `~/.config/mf-cli/presets`; a name with a `/` in it, such as `./studio.preset`, is a path to a preset file anywhere.
+
+The MiniFuse 4 starts with its factory settings every time it is powered on. With step 4 of the installation done, `mf-cli-autoload.service` runs `mf-cli autoload` when the interface is connected or you log in with it connected: if every setting is still at its power-on value, it applies the `preset auto` preset; if anything was changed, it leaves the device alone, so running it again after the preset was applied does nothing. `journalctl --user -u mf-cli-autoload` shows what it did:
+
+```
+[+] Applied preset 'studio'
+[*] Settings were changed since power-on; not applying preset 'studio'
+```
+
+To try it without replugging, power-cycle the interface and run `systemctl --user start mf-cli-autoload`.
 
 ## How it works
 
