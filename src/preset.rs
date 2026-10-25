@@ -6,13 +6,18 @@ use std::{env, fs, io::ErrorKind, path::PathBuf};
 
 const EXT: &str = "preset";
 
-fn config_dir() -> Result<PathBuf, String> {
+/// The user's configuration directory, usually ~/.config.
+pub(crate) fn config_home() -> Result<PathBuf, String> {
     match env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
-        Some(dir) => Ok(PathBuf::from(dir).join("mf-cli")),
+        Some(dir) => Ok(PathBuf::from(dir)),
         None => env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(".config/mf-cli"))
+            .map(|home| PathBuf::from(home).join(".config"))
             .ok_or_else(|| "Neither XDG_CONFIG_HOME nor HOME is set".into()),
     }
+}
+
+fn config_dir() -> Result<PathBuf, String> {
+    Ok(config_home()?.join("mf-cli"))
 }
 
 fn presets_dir() -> Result<PathBuf, String> {

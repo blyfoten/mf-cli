@@ -7,7 +7,7 @@
 use eframe::egui::{self, Color32, RichText};
 use mf_cli::device::{self, Model, Transport};
 use mf_cli::mf4::{self, Block};
-use mf_cli::preset;
+use mf_cli::{audio, preset};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -127,6 +127,9 @@ struct App {
     /// Name typed in the presets menu, and the outcome of the last preset action.
     preset_name: String,
     preset_msg: Option<Result<String, String>>,
+    /// PipeWire settings, read when the audio menu opens, and the outcome of the last change.
+    audio: Option<Result<audio::Settings, String>>,
+    audio_msg: Option<Result<String, String>>,
 }
 
 impl App {
@@ -633,6 +636,71 @@ impl App {
         };
     }
 
+    /// PipeWire buffer size and sample rate, which set the latency of all audio.
+    fn audio_settings(&mut self, ui: &mut egui::Ui) {
+        let s = match self.audio.get_or_insert_with(audio::read) {
+            Ok(s) => *s,
+            Err(e) => {
+                ui.colored_label(MUTE, e.as_str());
+                return;
+            }
+        };
+        let auto = |value: u32| if value == 0 { "Auto".to_string() } else { value.to_string() };
+        let mut changed = None;
+        egui::Grid::new("audio").num_columns(2).show(ui, |ui| {
+            ui.label("Buffer size").on_hover_text("Smaller is lower latency but needs more CPU");
+            let mut quantum = s.force_quantum;
+            // Buttons rather than a combo box, whose popup would close the menu
+            ui.horizontal(|ui| {
+                for q in std::iter::once(0).chain(audio::QUANTUMS) {
+                    ui.selectable_value(&mut quantum, q, auto(q));
+                }
+            });
+            if quantum != s.force_quantum {
+                changed = Some(audio::set_quantum(quantum));
+            }
+            ui.end_row();
+
+            ui.label("Sample rate");
+            let mut rate = s.force_rate;
+            ui.horizontal(|ui| {
+                for r in std::iter::once(0).chain(audio::RATES) {
+                    ui.selectable_value(&mut rate, r, auto(r));
+                }
+            });
+            if rate != s.force_rate {
+                changed = Some(audio::set_rate(rate));
+            }
+            ui.end_row();
+        });
+        if let Some(result) = changed {
+            self.audio_msg = Some(result.map(|_| "Applied until PipeWire restarts".into()));
+            self.audio = Some(audio::read());
+        }
+        let (frames, ms) = s.latency();
+        ui.label(format!("Buffer: {} frames, {:.1} ms", frames, ms))
+            .on_hover_text("Round trip through the interface is roughly twice this plus a few ms");
+        ui.separator();
+        let persisted = audio::persisted();
+        ui.horizontal(|ui| {
+            let hover = "Write these settings to a PipeWire configuration file so they are used after a restart";
+            if ui.button("Keep after restart").on_hover_text(hover).clicked() {
+                self.audio_msg = Some(audio::persist(&s).map(|path| match s.force_quantum + s.force_rate {
+                    0 => format!("Removed {}", path.display()),
+                    _ => format!("Saved to {}", path.display()),
+                }));
+            }
+            if persisted {
+                ui.label("(saved settings in use at start)");
+            }
+        });
+        match &self.audio_msg {
+            Some(Ok(msg)) => ui.label(msg),
+            Some(Err(e)) => ui.colored_label(MUTE, e),
+            None => ui.label(""),
+        };
+    }
+
     fn outputs(&mut self, ui: &mut egui::Ui, b: &Block) {
         egui::SidePanel::left("buses").resizable(false).show_inside(ui, |ui| {
             for bus in 0..3 {
@@ -687,6 +755,10 @@ impl eframe::App for App {
                     ui.add_space(20.0);
                     ui.menu_button("PRESETS", |ui| self.presets(ui, b));
                 }
+                if ui.menu_button("AUDIO", |ui| self.audio_settings(ui)).inner.is_none() {
+                    // Read again next time the menu opens, in case something else changed it
+                    self.audio = None;
+                }
                 if !self.kmod {
                     ui.colored_label(SOLO, "⚠ No kernel module: audio is interrupted while this is open");
                 } else if !self.has_meters {
@@ -731,7 +803,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("MiniFuse Control")
             .with_app_id("mf-gui")
-            .with_inner_size([1000.0, 540.0]),
+            .with_inner_size([1000.0, 540.0])
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/mf-gui-icon.png")).unwrap()),
         ..Default::default()
     };
     eframe::run_native(
@@ -762,6 +835,8 @@ fn main() -> eframe::Result {
                 show_all: false,
                 preset_name: String::new(),
                 preset_msg: None,
+                audio: None,
+                audio_msg: None,
             }))
         }),
     )

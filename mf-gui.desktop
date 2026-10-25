@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MiniFuse Control
+Comment=Mixer and settings for the Arturia MiniFuse 4
+Exec=mf-gui
+Icon=mf-gui
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+StartupWMClass=mf-gui

@@ -9,6 +9,7 @@ Linux control for the Arturia MiniFuse 1, 2 and 4 audio interfaces: the settings
 - Instrument mode (INST), phantom power (+48V) and Direct Mono (MiniFuse 1/2)
 - MiniFuse 4: INST on both inputs, input 3/4 gain and link, and the full Control Center mixer for Outputs 1&2, Outputs 3&4 and Loopback (level, balance, mute, solo, master, output source)
 - MiniFuse 4: `mf-gui`, a mixer window like Control Center with live level meters
+- `mf-gui` audio menu: PipeWire buffer size and sample rate, for low latency
 - MiniFuse 4: presets, and one that is applied by itself when the interface is connected
 - No audio dropouts and no `sudo` when the kernel module is installed
 
@@ -25,6 +26,13 @@ git clone https://github.com/blyfoten/mf-cli
 cd mf-cli
 cargo build --release --features gui
 sudo cp target/release/mf-cli target/release/mf-gui /usr/local/bin/
+```
+
+To start `mf-gui` from the application menu, with its icon:
+
+```bash
+sudo install -Dm644 mf-gui.desktop /usr/local/share/applications/mf-gui.desktop
+sudo install -Dm644 assets/mf-gui-icon.png /usr/local/share/icons/hicolor/256x256/apps/mf-gui.png
 ```
 
 Leave out `--features gui` (and `mf-gui`) to build only the CLI.
